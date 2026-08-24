@@ -6,6 +6,7 @@ import {
 	findServersByUserId,
 	findUserById,
 	getAccessibleServerIds,
+	getApplicationStats,
 	getPublicIpv4,
 	getPublicIpv6,
 	getPublicIpWithFallback,
@@ -171,6 +172,37 @@ const fetchMonitoringMetrics = async ({
 		});
 	}
 	return data;
+};
+
+const parseLocalMetric = (value: unknown) => {
+	if (typeof value === "number") return value;
+	if (typeof value !== "string") return undefined;
+	const parsed = Number.parseFloat(value);
+	return Number.isNaN(parsed) ? undefined : parsed;
+};
+
+const getLocalMonitoringOverview = async () => {
+	const stats = await getApplicationStats("dokploy");
+	if (!stats) {
+		return {};
+	}
+	const cpu = stats.cpu.at(-1)?.value;
+	const memory = stats.memory.at(-1)?.value;
+	const disk = stats.disk.at(-1)?.value;
+
+	return {
+		cpu: parseLocalMetric(cpu),
+		memUsedGB:
+			typeof memory === "object" && memory !== null && "used" in memory
+				? parseLocalMetric(memory.used)
+				: undefined,
+		diskUsed:
+			typeof disk === "object" &&
+			disk !== null &&
+			"diskUsedPercentage" in disk
+				? parseLocalMetric(disk.diskUsedPercentage)
+				: undefined,
+	};
 };
 
 export const serverRouter = createTRPCRouter({
@@ -377,6 +409,13 @@ export const serverRouter = createTRPCRouter({
 			return await Promise.all(
 				targets.map(async (target) => {
 					try {
+						if (!target.serverId) {
+							return {
+								...target,
+								available: true as const,
+								metrics: await getLocalMonitoringOverview(),
+							};
+						}
 						const monitoringTarget = await getMonitoringTarget(
 							ctx,
 							target.serverId,
