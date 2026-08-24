@@ -5,15 +5,18 @@ import {
 	deployMySql,
 	execAsync,
 	execAsyncRemote,
+	finalizeDatabaseMove,
 	findBackupsByDbId,
 	findEnvironmentById,
 	findMySqlById,
 	findProjectById,
 	getAccessibleServerIds,
 	getContainerLogs,
+	getPendingDatabaseMove,
 	getServiceContainerCommand,
 	getWebServerSettings,
 	IS_CLOUD,
+	moveDatabaseToServer,
 	rebuildDatabase,
 	removeMySqlById,
 	removeService,
@@ -501,6 +504,78 @@ export const mysqlRouter = createTRPCRouter({
 				resourceName: updatedMysql.appName,
 			});
 			return updatedMysql;
+		}),
+	moveToServer: protectedProcedure
+		.input(
+			z.object({
+				mysqlId: z.string(),
+				targetServerId: z.string().nullable(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.mysqlId, {
+				service: ["create"],
+				deployment: ["create"],
+			});
+			const mysql = await findMySqlById(input.mysqlId);
+			const result = await moveDatabaseToServer({
+				serviceType: "mysql",
+				id: input.mysqlId,
+				targetServerId: input.targetServerId,
+				session: ctx.session,
+			});
+			await audit(ctx, {
+				action: "update",
+				resourceType: "service",
+				resourceId: mysql.mysqlId,
+				resourceName: mysql.appName,
+				metadata: {
+					operation: "move-to-server",
+					sourceServerId: result.sourceServerId || "dokploy",
+					targetServerId: result.targetServerId || "dokploy",
+					sourceCleanupPending: true,
+				},
+			});
+			return result;
+		}),
+	pendingServerMove: protectedProcedure
+		.input(apiFindOneMySql)
+		.query(async ({ input, ctx }) => {
+			await checkServiceAccess(ctx, input.mysqlId, "read");
+			return getPendingDatabaseMove({
+				serviceType: "mysql",
+				id: input.mysqlId,
+			});
+		}),
+	finalizeServerMove: protectedProcedure
+		.input(
+			z.object({
+				mysqlId: z.string(),
+				migrationId: z.string(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.mysqlId, {
+				service: ["delete"],
+			});
+			const mysql = await findMySqlById(input.mysqlId);
+			await finalizeDatabaseMove({
+				serviceType: "mysql",
+				id: input.mysqlId,
+				migrationId: input.migrationId,
+				session: ctx.session,
+			});
+			await audit(ctx, {
+				action: "delete",
+				resourceType: "service",
+				resourceId: mysql.mysqlId,
+				resourceName: mysql.appName,
+				metadata: {
+					operation: "finalize-server-move",
+					targetServerId: mysql.serverId || "dokploy",
+				},
+			});
+			return true;
 		}),
 	rebuild: protectedProcedure
 		.input(apiRebuildMysql)

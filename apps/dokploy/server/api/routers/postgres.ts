@@ -5,6 +5,7 @@ import {
 	deployPostgres,
 	execAsync,
 	execAsyncRemote,
+	finalizeDatabaseMove,
 	findBackupsByDbId,
 	findEnvironmentById,
 	findPostgresById,
@@ -12,9 +13,11 @@ import {
 	getAccessibleServerIds,
 	getContainerLogs,
 	getMountPath,
+	getPendingDatabaseMove,
 	getServiceContainerCommand,
 	getWebServerSettings,
 	IS_CLOUD,
+	moveDatabaseToServer,
 	rebuildDatabase,
 	removePostgresById,
 	removeService,
@@ -504,6 +507,78 @@ export const postgresRouter = createTRPCRouter({
 				resourceName: updatedPostgres.appName,
 			});
 			return updatedPostgres;
+		}),
+	moveToServer: protectedProcedure
+		.input(
+			z.object({
+				postgresId: z.string(),
+				targetServerId: z.string().nullable(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.postgresId, {
+				service: ["create"],
+				deployment: ["create"],
+			});
+			const postgres = await findPostgresById(input.postgresId);
+			const result = await moveDatabaseToServer({
+				serviceType: "postgres",
+				id: input.postgresId,
+				targetServerId: input.targetServerId,
+				session: ctx.session,
+			});
+			await audit(ctx, {
+				action: "update",
+				resourceType: "service",
+				resourceId: postgres.postgresId,
+				resourceName: postgres.appName,
+				metadata: {
+					operation: "move-to-server",
+					sourceServerId: result.sourceServerId || "dokploy",
+					targetServerId: result.targetServerId || "dokploy",
+					sourceCleanupPending: true,
+				},
+			});
+			return result;
+		}),
+	pendingServerMove: protectedProcedure
+		.input(apiFindOnePostgres)
+		.query(async ({ input, ctx }) => {
+			await checkServiceAccess(ctx, input.postgresId, "read");
+			return getPendingDatabaseMove({
+				serviceType: "postgres",
+				id: input.postgresId,
+			});
+		}),
+	finalizeServerMove: protectedProcedure
+		.input(
+			z.object({
+				postgresId: z.string(),
+				migrationId: z.string(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.postgresId, {
+				service: ["delete"],
+			});
+			const postgres = await findPostgresById(input.postgresId);
+			await finalizeDatabaseMove({
+				serviceType: "postgres",
+				id: input.postgresId,
+				migrationId: input.migrationId,
+				session: ctx.session,
+			});
+			await audit(ctx, {
+				action: "delete",
+				resourceType: "service",
+				resourceId: postgres.postgresId,
+				resourceName: postgres.appName,
+				metadata: {
+					operation: "finalize-server-move",
+					targetServerId: postgres.serverId || "dokploy",
+				},
+			});
+			return true;
 		}),
 	rebuild: protectedProcedure
 		.input(apiRebuildPostgres)

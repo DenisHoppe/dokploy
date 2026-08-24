@@ -33,6 +33,7 @@ import { ShowBackups } from "@/components/dashboard/database/backups/show-backup
 import { ComposeFreeMonitoring } from "@/components/dashboard/monitoring/free/container/show-free-compose-monitoring";
 import { ComposePaidMonitoring } from "@/components/dashboard/monitoring/paid/container/show-paid-compose-monitoring";
 import { AssignComposeNetworks } from "@/components/dashboard/networks/assign-compose-networks";
+import { MoveServiceToServer } from "@/components/dashboard/shared/move-service-to-server";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
 import { StatusTooltip } from "@/components/shared/status-tooltip";
@@ -181,7 +182,13 @@ const Service = (
 									</div>
 									<div className="flex flex-row gap-2 justify-end">
 										{permissions?.service.create && (
-											<UpdateCompose composeId={composeId} />
+											<>
+												<MoveServiceToServer
+													serviceType="compose"
+													serviceId={composeId}
+												/>
+												<UpdateCompose composeId={composeId} />
+											</>
 										)}
 
 										{permissions?.service.delete && (

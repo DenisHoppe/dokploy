@@ -22,6 +22,7 @@ import { ShowExternalPostgresCredentials } from "@/components/dashboard/postgres
 import { ShowGeneralPostgres } from "@/components/dashboard/postgres/general/show-general-postgres";
 import { ShowInternalPostgresCredentials } from "@/components/dashboard/postgres/general/show-internal-postgres-credentials";
 import { UpdatePostgres } from "@/components/dashboard/postgres/update-postgres";
+import { MoveServiceToServer } from "@/components/dashboard/shared/move-service-to-server";
 import { ShowDatabaseAdvancedSettings } from "@/components/dashboard/shared/show-database-advanced-settings";
 import { PostgresqlIcon } from "@/components/icons/data-tools-icons";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
@@ -156,7 +157,13 @@ const Postgresql = (
 
 								<div className="flex flex-row gap-2 justify-end">
 									{permissions?.service.create && (
-										<UpdatePostgres postgresId={postgresId} />
+										<>
+											<MoveServiceToServer
+												serviceType="postgres"
+												serviceId={postgresId}
+											/>
+											<UpdatePostgres postgresId={postgresId} />
+										</>
 									)}
 									{permissions?.service.delete && (
 										<DeleteService id={postgresId} type="postgres" />

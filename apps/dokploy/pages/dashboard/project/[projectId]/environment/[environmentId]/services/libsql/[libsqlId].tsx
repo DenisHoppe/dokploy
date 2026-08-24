@@ -22,6 +22,7 @@ import { ShowInternalLibsqlCredentials } from "@/components/dashboard/libsql/gen
 import { UpdateLibsql } from "@/components/dashboard/libsql/update-libsql";
 import { ContainerFreeMonitoring } from "@/components/dashboard/monitoring/free/container/show-free-container-monitoring";
 import { ContainerPaidMonitoring } from "@/components/dashboard/monitoring/paid/container/show-paid-container-monitoring";
+import { MoveServiceToServer } from "@/components/dashboard/shared/move-service-to-server";
 import { ShowDatabaseAdvancedSettings } from "@/components/dashboard/shared/show-database-advanced-settings";
 import { LibsqlIcon } from "@/components/icons/data-tools-icons";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
@@ -61,6 +62,7 @@ const Libsql = (
 	const [tab, setSab] = useState<TabState>(activeTab);
 	const { data } = api.libsql.one.useQuery({ libsqlId });
 	const { data: auth } = api.user.get.useQuery();
+	const { data: permissions } = api.user.getPermissions.useQuery();
 
 	const { data: isCloud } = api.settings.isCloud.useQuery();
 	const { data: serverIp } = api.settings.getIp.useQuery();
@@ -144,6 +146,12 @@ const Libsql = (
 									)}
 								</div>
 								<div className="flex flex-row gap-2 justify-end">
+									{permissions?.service.create && (
+										<MoveServiceToServer
+											serviceType="libsql"
+											serviceId={libsqlId}
+										/>
+									)}
 									<UpdateLibsql libsqlId={libsqlId} />
 									{(auth?.role === "owner" || auth?.canDeleteServices) && (
 										<DeleteService id={libsqlId} type="libsql" />

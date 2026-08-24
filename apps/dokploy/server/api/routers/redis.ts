@@ -5,14 +5,17 @@ import {
 	deployRedis,
 	execAsync,
 	execAsyncRemote,
+	finalizeDatabaseMove,
 	findEnvironmentById,
 	findProjectById,
 	findRedisById,
 	getAccessibleServerIds,
 	getContainerLogs,
+	getPendingDatabaseMove,
 	getServiceContainerCommand,
 	getWebServerSettings,
 	IS_CLOUD,
+	moveDatabaseToServer,
 	rebuildDatabase,
 	removeRedisById,
 	removeService,
@@ -485,6 +488,78 @@ export const redisRouter = createTRPCRouter({
 				resourceName: updatedRedis.appName,
 			});
 			return updatedRedis;
+		}),
+	moveToServer: protectedProcedure
+		.input(
+			z.object({
+				redisId: z.string(),
+				targetServerId: z.string().nullable(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.redisId, {
+				service: ["create"],
+				deployment: ["create"],
+			});
+			const redis = await findRedisById(input.redisId);
+			const result = await moveDatabaseToServer({
+				serviceType: "redis",
+				id: input.redisId,
+				targetServerId: input.targetServerId,
+				session: ctx.session,
+			});
+			await audit(ctx, {
+				action: "update",
+				resourceType: "service",
+				resourceId: redis.redisId,
+				resourceName: redis.appName,
+				metadata: {
+					operation: "move-to-server",
+					sourceServerId: result.sourceServerId || "dokploy",
+					targetServerId: result.targetServerId || "dokploy",
+					sourceCleanupPending: true,
+				},
+			});
+			return result;
+		}),
+	pendingServerMove: protectedProcedure
+		.input(apiFindOneRedis)
+		.query(async ({ input, ctx }) => {
+			await checkServiceAccess(ctx, input.redisId, "read");
+			return getPendingDatabaseMove({
+				serviceType: "redis",
+				id: input.redisId,
+			});
+		}),
+	finalizeServerMove: protectedProcedure
+		.input(
+			z.object({
+				redisId: z.string(),
+				migrationId: z.string(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.redisId, {
+				service: ["delete"],
+			});
+			const redis = await findRedisById(input.redisId);
+			await finalizeDatabaseMove({
+				serviceType: "redis",
+				id: input.redisId,
+				migrationId: input.migrationId,
+				session: ctx.session,
+			});
+			await audit(ctx, {
+				action: "delete",
+				resourceType: "service",
+				resourceId: redis.redisId,
+				resourceName: redis.appName,
+				metadata: {
+					operation: "finalize-server-move",
+					targetServerId: redis.serverId || "dokploy",
+				},
+			});
+			return true;
 		}),
 	rebuild: protectedProcedure
 		.input(apiRebuildRedis)
