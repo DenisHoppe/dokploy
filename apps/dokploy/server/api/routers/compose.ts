@@ -10,6 +10,7 @@ import {
 	deleteMount,
 	execAsync,
 	execAsyncRemote,
+	finalizeComposeMove,
 	findComposeById,
 	findDomainsByComposeId,
 	findEnvironmentById,
@@ -18,9 +19,11 @@ import {
 	getAccessibleServerIds,
 	getComposeContainer,
 	getContainerLogs,
+	getPendingComposeMove,
 	getWebServerSettings,
 	IS_CLOUD,
 	loadServices,
+	moveComposeToServer,
 	randomizeComposeFile,
 	randomizeIsolatedDeploymentComposeFile,
 	removeCompose,
@@ -800,6 +803,73 @@ export const composeRouter = createTRPCRouter({
 				resourceName: updatedCompose.name,
 			});
 			return updatedCompose;
+		}),
+	moveToServer: protectedProcedure
+		.input(
+			z.object({
+				composeId: z.string(),
+				targetServerId: z.string().nullable(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.composeId, {
+				service: ["create"],
+				deployment: ["create"],
+			});
+			const compose = await findComposeById(input.composeId);
+			const result = await moveComposeToServer({
+				composeId: input.composeId,
+				targetServerId: input.targetServerId,
+				session: ctx.session,
+			});
+			await audit(ctx, {
+				action: "update",
+				resourceType: "compose",
+				resourceId: compose.composeId,
+				resourceName: compose.name,
+				metadata: {
+					operation: "move-to-server",
+					sourceServerId: result.sourceServerId || "dokploy",
+					targetServerId: result.targetServerId || "dokploy",
+					sourceCleanupPending: true,
+				},
+			});
+			return result;
+		}),
+	pendingServerMove: protectedProcedure
+		.input(apiFindCompose)
+		.query(async ({ input, ctx }) => {
+			await checkServiceAccess(ctx, input.composeId, "read");
+			return getPendingComposeMove(input.composeId);
+		}),
+	finalizeServerMove: protectedProcedure
+		.input(
+			z.object({
+				composeId: z.string(),
+				migrationId: z.string(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.composeId, {
+				service: ["delete"],
+			});
+			const compose = await findComposeById(input.composeId);
+			await finalizeComposeMove({
+				composeId: input.composeId,
+				migrationId: input.migrationId,
+				session: ctx.session,
+			});
+			await audit(ctx, {
+				action: "delete",
+				resourceType: "compose",
+				resourceId: compose.composeId,
+				resourceName: compose.name,
+				metadata: {
+					operation: "finalize-server-move",
+					targetServerId: compose.serverId || "dokploy",
+				},
+			});
+			return true;
 		}),
 
 	processTemplate: protectedProcedure

@@ -5,15 +5,18 @@ import {
 	deployMariadb,
 	execAsync,
 	execAsyncRemote,
+	finalizeDatabaseMove,
 	findBackupsByDbId,
 	findEnvironmentById,
 	findMariadbById,
 	findProjectById,
 	getAccessibleServerIds,
 	getContainerLogs,
+	getPendingDatabaseMove,
 	getServiceContainerCommand,
 	getWebServerSettings,
 	IS_CLOUD,
+	moveDatabaseToServer,
 	rebuildDatabase,
 	removeMariadbById,
 	removeService,
@@ -483,6 +486,78 @@ export const mariadbRouter = createTRPCRouter({
 				resourceName: updatedMariadb.appName,
 			});
 			return updatedMariadb;
+		}),
+	moveToServer: protectedProcedure
+		.input(
+			z.object({
+				mariadbId: z.string(),
+				targetServerId: z.string().nullable(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.mariadbId, {
+				service: ["create"],
+				deployment: ["create"],
+			});
+			const mariadb = await findMariadbById(input.mariadbId);
+			const result = await moveDatabaseToServer({
+				serviceType: "mariadb",
+				id: input.mariadbId,
+				targetServerId: input.targetServerId,
+				session: ctx.session,
+			});
+			await audit(ctx, {
+				action: "update",
+				resourceType: "service",
+				resourceId: mariadb.mariadbId,
+				resourceName: mariadb.appName,
+				metadata: {
+					operation: "move-to-server",
+					sourceServerId: result.sourceServerId || "dokploy",
+					targetServerId: result.targetServerId || "dokploy",
+					sourceCleanupPending: true,
+				},
+			});
+			return result;
+		}),
+	pendingServerMove: protectedProcedure
+		.input(apiFindOneMariaDB)
+		.query(async ({ input, ctx }) => {
+			await checkServiceAccess(ctx, input.mariadbId, "read");
+			return getPendingDatabaseMove({
+				serviceType: "mariadb",
+				id: input.mariadbId,
+			});
+		}),
+	finalizeServerMove: protectedProcedure
+		.input(
+			z.object({
+				mariadbId: z.string(),
+				migrationId: z.string(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.mariadbId, {
+				service: ["delete"],
+			});
+			const mariadb = await findMariadbById(input.mariadbId);
+			await finalizeDatabaseMove({
+				serviceType: "mariadb",
+				id: input.mariadbId,
+				migrationId: input.migrationId,
+				session: ctx.session,
+			});
+			await audit(ctx, {
+				action: "delete",
+				resourceType: "service",
+				resourceId: mariadb.mariadbId,
+				resourceName: mariadb.appName,
+				metadata: {
+					operation: "finalize-server-move",
+					targetServerId: mariadb.serverId || "dokploy",
+				},
+			});
+			return true;
 		}),
 	rebuild: protectedProcedure
 		.input(apiRebuildMariadb)

@@ -3,13 +3,16 @@ import {
 	createLibsql,
 	createMount,
 	deployLibsql,
+	finalizeDatabaseMove,
 	findEnvironmentById,
 	findLibsqlById,
 	findProjectById,
 	getAccessibleServerIds,
 	getContainerLogs,
+	getPendingDatabaseMove,
 	getWebServerSettings,
 	IS_CLOUD,
+	moveDatabaseToServer,
 	rebuildDatabase,
 	removeLibsqlById,
 	removeService,
@@ -456,6 +459,78 @@ export const libsqlRouter = createTRPCRouter({
 				resourceName: updatedLibsql.appName,
 			});
 			return updatedLibsql;
+		}),
+	moveToServer: protectedProcedure
+		.input(
+			z.object({
+				libsqlId: z.string(),
+				targetServerId: z.string().nullable(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.libsqlId, {
+				service: ["create"],
+				deployment: ["create"],
+			});
+			const libsql = await findLibsqlById(input.libsqlId);
+			const result = await moveDatabaseToServer({
+				serviceType: "libsql",
+				id: input.libsqlId,
+				targetServerId: input.targetServerId,
+				session: ctx.session,
+			});
+			await audit(ctx, {
+				action: "update",
+				resourceType: "service",
+				resourceId: libsql.libsqlId,
+				resourceName: libsql.appName,
+				metadata: {
+					operation: "move-to-server",
+					sourceServerId: result.sourceServerId || "dokploy",
+					targetServerId: result.targetServerId || "dokploy",
+					sourceCleanupPending: true,
+				},
+			});
+			return result;
+		}),
+	pendingServerMove: protectedProcedure
+		.input(apiFindOneLibsql)
+		.query(async ({ input, ctx }) => {
+			await checkServiceAccess(ctx, input.libsqlId, "read");
+			return getPendingDatabaseMove({
+				serviceType: "libsql",
+				id: input.libsqlId,
+			});
+		}),
+	finalizeServerMove: protectedProcedure
+		.input(
+			z.object({
+				libsqlId: z.string(),
+				migrationId: z.string(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.libsqlId, {
+				service: ["delete"],
+			});
+			const libsql = await findLibsqlById(input.libsqlId);
+			await finalizeDatabaseMove({
+				serviceType: "libsql",
+				id: input.libsqlId,
+				migrationId: input.migrationId,
+				session: ctx.session,
+			});
+			await audit(ctx, {
+				action: "delete",
+				resourceType: "service",
+				resourceId: libsql.libsqlId,
+				resourceName: libsql.appName,
+				metadata: {
+					operation: "finalize-server-move",
+					targetServerId: libsql.serverId || "dokploy",
+				},
+			});
+			return true;
 		}),
 	rebuild: protectedProcedure
 		.input(apiRebuildLibsql)

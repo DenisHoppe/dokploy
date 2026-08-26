@@ -5,15 +5,18 @@ import {
 	deployMongo,
 	execAsync,
 	execAsyncRemote,
+	finalizeDatabaseMove,
 	findBackupsByDbId,
 	findEnvironmentById,
 	findMongoById,
 	findProjectById,
 	getAccessibleServerIds,
 	getContainerLogs,
+	getPendingDatabaseMove,
 	getServiceContainerCommand,
 	getWebServerSettings,
 	IS_CLOUD,
+	moveDatabaseToServer,
 	rebuildDatabase,
 	removeMongoById,
 	removeService,
@@ -498,6 +501,78 @@ export const mongoRouter = createTRPCRouter({
 				resourceName: updatedMongo.appName,
 			});
 			return updatedMongo;
+		}),
+	moveToServer: protectedProcedure
+		.input(
+			z.object({
+				mongoId: z.string(),
+				targetServerId: z.string().nullable(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.mongoId, {
+				service: ["create"],
+				deployment: ["create"],
+			});
+			const mongo = await findMongoById(input.mongoId);
+			const result = await moveDatabaseToServer({
+				serviceType: "mongo",
+				id: input.mongoId,
+				targetServerId: input.targetServerId,
+				session: ctx.session,
+			});
+			await audit(ctx, {
+				action: "update",
+				resourceType: "service",
+				resourceId: mongo.mongoId,
+				resourceName: mongo.appName,
+				metadata: {
+					operation: "move-to-server",
+					sourceServerId: result.sourceServerId || "dokploy",
+					targetServerId: result.targetServerId || "dokploy",
+					sourceCleanupPending: true,
+				},
+			});
+			return result;
+		}),
+	pendingServerMove: protectedProcedure
+		.input(apiFindOneMongo)
+		.query(async ({ input, ctx }) => {
+			await checkServiceAccess(ctx, input.mongoId, "read");
+			return getPendingDatabaseMove({
+				serviceType: "mongo",
+				id: input.mongoId,
+			});
+		}),
+	finalizeServerMove: protectedProcedure
+		.input(
+			z.object({
+				mongoId: z.string(),
+				migrationId: z.string(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.mongoId, {
+				service: ["delete"],
+			});
+			const mongo = await findMongoById(input.mongoId);
+			await finalizeDatabaseMove({
+				serviceType: "mongo",
+				id: input.mongoId,
+				migrationId: input.migrationId,
+				session: ctx.session,
+			});
+			await audit(ctx, {
+				action: "delete",
+				resourceType: "service",
+				resourceId: mongo.mongoId,
+				resourceName: mongo.appName,
+				metadata: {
+					operation: "finalize-server-move",
+					targetServerId: mongo.serverId || "dokploy",
+				},
+			});
+			return true;
 		}),
 	rebuild: protectedProcedure
 		.input(apiRebuildMongo)

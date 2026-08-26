@@ -26,7 +26,10 @@ import {
 	findPostgresById,
 	findProjectById,
 	findRedisById,
+	findServerById,
 	findUserById,
+	getAccessibleServerIds,
+	getWebServerSettings,
 	IS_CLOUD,
 	updateProjectById,
 } from "@dokploy/server";
@@ -56,14 +59,21 @@ import {
 	apiUpdateProject,
 	applications,
 	compose,
+	compose as composeTable,
 	environments,
 	libsql,
+	libsql as libsqlTable,
 	mariadb,
+	mariadb as mariadbTable,
 	mongo,
+	mongo as mongoTable,
 	mysql,
+	mysql as mysqlTable,
 	postgres,
+	postgres as postgresTable,
 	projects,
 	redis,
+	redis as redisTable,
 } from "@/server/db/schema";
 
 export const projectRouter = createTRPCRouter({
@@ -831,11 +841,47 @@ export const projectRouter = createTRPCRouter({
 					)
 					.optional(),
 				duplicateInSameProject: z.boolean().default(false),
+				targetServerId: z.string().nullable().optional(),
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
 			try {
 				await checkProjectAccess(ctx, "create");
+
+				if (input.targetServerId !== undefined) {
+					if (input.targetServerId === null) {
+						const webServerSettings = await getWebServerSettings();
+						if (IS_CLOUD || webServerSettings?.remoteServersOnly) {
+							throw new TRPCError({
+								code: "BAD_REQUEST",
+								message: "The local Dokploy server is not available",
+							});
+						}
+					} else {
+						const accessibleIds = await getAccessibleServerIds(ctx.session);
+						if (!accessibleIds.has(input.targetServerId)) {
+							throw new TRPCError({
+								code: "UNAUTHORIZED",
+								message: "You are not authorized to access the target server",
+							});
+						}
+
+						const targetServer = await findServerById(input.targetServerId);
+						if (
+							targetServer.organizationId !==
+								ctx.session.activeOrganizationId ||
+							targetServer.serverStatus !== "active" ||
+							targetServer.serverType !== "deploy" ||
+							!targetServer.sshKeyId
+						) {
+							throw new TRPCError({
+								code: "BAD_REQUEST",
+								message:
+									"The target server must be an active deployment server with an SSH key",
+							});
+						}
+					}
+				}
 
 				const sourceEnvironment = input.duplicateInSameProject
 					? await findEnvironmentById(input.sourceEnvironmentId)
@@ -912,7 +958,25 @@ export const projectRouter = createTRPCRouter({
 										? `${application.name} (copy)`
 										: application.name,
 									environmentId: targetProject?.environmentId || "",
+									serverId:
+										input.targetServerId === undefined
+											? application.serverId || undefined
+											: input.targetServerId || undefined,
 								});
+								if (
+									input.targetServerId !== undefined &&
+									input.targetServerId !== application.serverId
+								) {
+									await db
+										.update(applications)
+										.set({ networkIds: [] })
+										.where(
+											eq(
+												applications.applicationId,
+												newApplication.applicationId,
+											),
+										);
+								}
 
 								for (const domain of domains) {
 									const { domainId, ...rest } = domain;
@@ -989,7 +1053,20 @@ export const projectRouter = createTRPCRouter({
 										? `${compose.name} (copy)`
 										: compose.name,
 									environmentId: targetProject?.environmentId || "",
+									serverId:
+										input.targetServerId === undefined
+											? compose.serverId || undefined
+											: input.targetServerId || undefined,
 								});
+								if (
+									input.targetServerId !== undefined &&
+									input.targetServerId !== compose.serverId
+								) {
+									await db
+										.update(composeTable)
+										.set({ serviceNetworks: [] })
+										.where(eq(composeTable.composeId, newCompose.composeId));
+								}
 
 								for (const mount of mounts) {
 									const { mountId, ...rest } = mount;
@@ -1027,7 +1104,20 @@ export const projectRouter = createTRPCRouter({
 										? `${libsql.name} (copy)`
 										: libsql.name,
 									environmentId: targetProject?.environmentId || "",
+									serverId:
+										input.targetServerId === undefined
+											? libsql.serverId
+											: input.targetServerId,
 								});
+								if (
+									input.targetServerId !== undefined &&
+									input.targetServerId !== libsql.serverId
+								) {
+									await db
+										.update(libsqlTable)
+										.set({ networkIds: [] })
+										.where(eq(libsqlTable.libsqlId, newLibsql.libsqlId));
+								}
 
 								for (const mount of mounts) {
 									const { mountId, ...rest } = mount;
@@ -1056,7 +1146,20 @@ export const projectRouter = createTRPCRouter({
 										? `${mariadb.name} (copy)`
 										: mariadb.name,
 									environmentId: targetProject?.environmentId || "",
+									serverId:
+										input.targetServerId === undefined
+											? mariadb.serverId || undefined
+											: input.targetServerId || undefined,
 								});
+								if (
+									input.targetServerId !== undefined &&
+									input.targetServerId !== mariadb.serverId
+								) {
+									await db
+										.update(mariadbTable)
+										.set({ networkIds: [] })
+										.where(eq(mariadbTable.mariadbId, newMariadb.mariadbId));
+								}
 
 								for (const mount of mounts) {
 									const { mountId, ...rest } = mount;
@@ -1092,7 +1195,20 @@ export const projectRouter = createTRPCRouter({
 										? `${mongo.name} (copy)`
 										: mongo.name,
 									environmentId: targetProject?.environmentId || "",
+									serverId:
+										input.targetServerId === undefined
+											? mongo.serverId || undefined
+											: input.targetServerId || undefined,
 								});
+								if (
+									input.targetServerId !== undefined &&
+									input.targetServerId !== mongo.serverId
+								) {
+									await db
+										.update(mongoTable)
+										.set({ networkIds: [] })
+										.where(eq(mongoTable.mongoId, newMongo.mongoId));
+								}
 
 								for (const mount of mounts) {
 									const { mountId, ...rest } = mount;
@@ -1128,7 +1244,20 @@ export const projectRouter = createTRPCRouter({
 										? `${mysql.name} (copy)`
 										: mysql.name,
 									environmentId: targetProject?.environmentId || "",
+									serverId:
+										input.targetServerId === undefined
+											? mysql.serverId || undefined
+											: input.targetServerId || undefined,
 								});
+								if (
+									input.targetServerId !== undefined &&
+									input.targetServerId !== mysql.serverId
+								) {
+									await db
+										.update(mysqlTable)
+										.set({ networkIds: [] })
+										.where(eq(mysqlTable.mysqlId, newMysql.mysqlId));
+								}
 
 								for (const mount of mounts) {
 									const { mountId, ...rest } = mount;
@@ -1164,7 +1293,22 @@ export const projectRouter = createTRPCRouter({
 										? `${postgres.name} (copy)`
 										: postgres.name,
 									environmentId: targetProject?.environmentId || "",
+									serverId:
+										input.targetServerId === undefined
+											? postgres.serverId || undefined
+											: input.targetServerId || undefined,
 								});
+								if (
+									input.targetServerId !== undefined &&
+									input.targetServerId !== postgres.serverId
+								) {
+									await db
+										.update(postgresTable)
+										.set({ networkIds: [] })
+										.where(
+											eq(postgresTable.postgresId, newPostgres.postgresId),
+										);
+								}
 
 								for (const mount of mounts) {
 									const { mountId, ...rest } = mount;
@@ -1200,7 +1344,20 @@ export const projectRouter = createTRPCRouter({
 										? `${redis.name} (copy)`
 										: redis.name,
 									environmentId: targetProject?.environmentId || "",
+									serverId:
+										input.targetServerId === undefined
+											? redis.serverId || undefined
+											: input.targetServerId || undefined,
 								});
+								if (
+									input.targetServerId !== undefined &&
+									input.targetServerId !== redis.serverId
+								) {
+									await db
+										.update(redisTable)
+										.set({ networkIds: [] })
+										.where(eq(redisTable.redisId, newRedis.redisId));
+								}
 
 								for (const mount of mounts) {
 									const { mountId, ...rest } = mount;
@@ -1230,7 +1387,13 @@ export const projectRouter = createTRPCRouter({
 					resourceType: "project",
 					resourceId: targetProject?.projectId || "",
 					resourceName: input.name,
-					metadata: { duplicatedFrom: input.sourceEnvironmentId },
+					metadata: {
+						duplicatedFrom: input.sourceEnvironmentId,
+						targetServerId:
+							input.targetServerId === undefined
+								? "source"
+								: input.targetServerId || "dokploy",
+					},
 				});
 				return targetProject;
 			} catch (error) {

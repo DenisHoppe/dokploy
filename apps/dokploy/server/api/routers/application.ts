@@ -2,10 +2,13 @@ import {
 	clearOldDeployments,
 	createApplication,
 	deleteAllMiddlewares,
+	deployApplication,
 	findApplicationById,
+	findDeploymentById,
 	findEnvironmentById,
 	findPreviewDeploymentsByApplicationId,
 	findProjectById,
+	findServerById,
 	getAccessibleServerIds,
 	getApplicationStats,
 	getContainerLogs,
@@ -27,6 +30,7 @@ import {
 	unzipDrop,
 	updateApplication,
 	updateApplicationStatus,
+	updateDeployment,
 	updateDeploymentStatus,
 	writeConfig,
 	writeConfigRemote,
@@ -77,6 +81,35 @@ import {
 	myQueue,
 } from "@/server/queues/queueSetup";
 import { cancelDeployment, deploy } from "@/server/utils/deploy";
+
+const serverMoveMetadata = z.object({
+	type: z.literal("server-move"),
+	status: z.enum(["pending", "finalized"]),
+	sourceServerId: z.string().nullable(),
+	targetServerId: z.string().nullable(),
+});
+
+const parseServerMoveMetadata = (description: string | null) => {
+	if (!description) return null;
+	try {
+		const result = serverMoveMetadata.safeParse(JSON.parse(description));
+		return result.success ? result.data : null;
+	} catch {
+		return null;
+	}
+};
+
+const removeServiceForMove = async (
+	appName: string,
+	serverId: string | null,
+) => {
+	const error = await removeService(appName, serverId);
+	if (error) {
+		throw error instanceof Error
+			? error
+			: new Error("Failed to remove the Docker service");
+	}
+};
 
 export const applicationRouter = createTRPCRouter({
 	create: protectedProcedure
@@ -926,6 +959,225 @@ export const applicationRouter = createTRPCRouter({
 				resourceName: updatedApplication.appName,
 			});
 			return updatedApplication;
+		}),
+	moveToServer: protectedProcedure
+		.input(
+			z.object({
+				applicationId: z.string(),
+				targetServerId: z.string().nullable(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.applicationId, {
+				service: ["create"],
+				deployment: ["create"],
+			});
+			const application = await findApplicationById(input.applicationId);
+			const sourceServerId = application.serverId;
+			const normalizedTargetServerId = input.targetServerId || null;
+
+			if (sourceServerId === normalizedTargetServerId) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "The application is already assigned to this server",
+				});
+			}
+
+			const unsupportedMounts = application.mounts.filter(
+				(mount) => mount.type === "bind" || mount.type === "volume",
+			);
+			if (unsupportedMounts.length > 0) {
+				throw new TRPCError({
+					code: "PRECONDITION_FAILED",
+					message:
+						"Applications with bind mounts or named volumes cannot be moved automatically",
+				});
+			}
+
+			if (normalizedTargetServerId) {
+				const accessibleIds = await getAccessibleServerIds(ctx.session);
+				if (!accessibleIds.has(normalizedTargetServerId)) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message: "You are not authorized to access the target server",
+					});
+				}
+				const targetServer = await findServerById(normalizedTargetServerId);
+				if (
+					targetServer.organizationId !== ctx.session.activeOrganizationId ||
+					targetServer.serverStatus !== "active" ||
+					targetServer.serverType !== "deploy" ||
+					!targetServer.sshKeyId
+				) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message:
+							"The target server must be an active deployment server with an SSH key",
+					});
+				}
+			} else {
+				const webServerSettings = await getWebServerSettings();
+				if (IS_CLOUD || webServerSettings?.remoteServersOnly) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: "The local Dokploy server is not available",
+					});
+				}
+			}
+
+			await updateApplication(input.applicationId, {
+				serverId: normalizedTargetServerId,
+				networkIds: [],
+			});
+			await updateApplicationStatus(input.applicationId, "running");
+
+			try {
+				const deployment = await deployApplication({
+					applicationId: input.applicationId,
+					titleLog: "Move to another server",
+					descriptionLog: JSON.stringify({
+						type: "server-move",
+						status: "pending",
+						sourceServerId,
+						targetServerId: normalizedTargetServerId,
+					}),
+					preserveDescription: true,
+				});
+				await audit(ctx, {
+					action: "update",
+					resourceType: "application",
+					resourceId: application.applicationId,
+					resourceName: application.appName,
+					metadata: {
+						operation: "move-to-server",
+						sourceServerId: sourceServerId || "dokploy",
+						targetServerId: normalizedTargetServerId || "dokploy",
+						sourceCleanupPending: true,
+					},
+				});
+
+				return {
+					deploymentId: deployment.deploymentId,
+					sourceServerId,
+					targetServerId: normalizedTargetServerId,
+					sourceCleanupPending: true,
+				};
+			} catch (error) {
+				await updateApplication(input.applicationId, {
+					serverId: sourceServerId,
+					networkIds: application.networkIds,
+				});
+				await updateApplicationStatus(
+					input.applicationId,
+					application.applicationStatus,
+				);
+
+				const cleanupResults = await Promise.allSettled([
+					removeServiceForMove(
+						application.appName,
+						normalizedTargetServerId,
+					),
+					removeDirectoryCode(application.appName, normalizedTargetServerId),
+					removeMonitoringDirectory(
+						application.appName,
+						normalizedTargetServerId,
+					),
+					removeTraefikConfig(application.appName, normalizedTargetServerId),
+				]);
+				for (const result of cleanupResults) {
+					if (result.status === "rejected") {
+						console.error(
+							"Failed to clean up target after move rollback",
+							result.reason,
+						);
+					}
+				}
+				throw error;
+			}
+		}),
+	pendingServerMove: protectedProcedure
+		.input(z.object({ applicationId: z.string() }))
+		.query(async ({ input, ctx }) => {
+			await checkServiceAccess(ctx, input.applicationId);
+			const application = await findApplicationById(input.applicationId);
+			for (const deployment of application.deployments) {
+				const metadata = parseServerMoveMetadata(deployment.description);
+				if (
+					deployment.status === "done" &&
+					metadata?.status === "pending" &&
+					metadata.targetServerId === application.serverId
+				) {
+					return {
+						deploymentId: deployment.deploymentId,
+						sourceServerId: metadata.sourceServerId,
+						targetServerId: metadata.targetServerId,
+					};
+				}
+			}
+			return null;
+		}),
+	finalizeServerMove: protectedProcedure
+		.input(
+			z.object({
+				applicationId: z.string(),
+				deploymentId: z.string(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.applicationId, {
+				service: ["delete"],
+			});
+			const application = await findApplicationById(input.applicationId);
+			const deployment = await findDeploymentById(input.deploymentId);
+			const metadata = parseServerMoveMetadata(deployment.description);
+			if (
+				deployment.applicationId !== input.applicationId ||
+				deployment.status !== "done" ||
+				metadata?.status !== "pending" ||
+				metadata.targetServerId !== application.serverId
+			) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "This deployment is not a pending move for the application",
+				});
+			}
+
+			if (metadata.sourceServerId) {
+				const accessibleIds = await getAccessibleServerIds(ctx.session);
+				if (!accessibleIds.has(metadata.sourceServerId)) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message: "You are not authorized to clean up the source server",
+					});
+				}
+			}
+
+			await removeServiceForMove(
+				application.appName,
+				metadata.sourceServerId,
+			);
+			await removeDirectoryCode(application.appName, metadata.sourceServerId);
+			await removeMonitoringDirectory(
+				application.appName,
+				metadata.sourceServerId,
+			);
+			await removeTraefikConfig(application.appName, metadata.sourceServerId);
+			await updateDeployment(input.deploymentId, {
+				description: JSON.stringify({ ...metadata, status: "finalized" }),
+			});
+
+			await audit(ctx, {
+				action: "delete",
+				resourceType: "application",
+				resourceId: application.applicationId,
+				resourceName: application.appName,
+				metadata: {
+					operation: "finalize-server-move",
+					sourceServerId: metadata.sourceServerId || "dokploy",
+					targetServerId: application.serverId || "dokploy",
+				},
+			});
+			return true;
 		}),
 
 	cancelDeployment: protectedProcedure

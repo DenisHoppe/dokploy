@@ -179,10 +179,12 @@ export const deployApplication = async ({
 	applicationId,
 	titleLog = "Manual deployment",
 	descriptionLog = "",
+	preserveDescription = false,
 }: {
 	applicationId: string;
 	titleLog: string;
 	descriptionLog: string;
+	preserveDescription?: boolean;
 }) => {
 	const application = await findApplicationById(applicationId);
 	const serverId = application.buildServerId || application.serverId;
@@ -285,12 +287,14 @@ export const deployApplication = async ({
 			if (commitInfo) {
 				await updateDeployment(deployment.deploymentId, {
 					title: commitInfo.message,
-					description: `Commit: ${commitInfo.hash}`,
+					...(!preserveDescription && {
+						description: `Commit: ${commitInfo.hash}`,
+					}),
 				});
 			}
 		}
 	}
-	return true;
+	return deployment;
 };
 
 export const rebuildApplication = async ({
